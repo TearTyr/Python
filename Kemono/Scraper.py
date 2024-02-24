@@ -1,17 +1,23 @@
-import requests
-from bs4 import BeautifulSoup
-import os
 from concurrent.futures import ThreadPoolExecutor
+from bs4 import BeautifulSoup
+import requests
+import os
 import urllib.parse
 
-def download_file(url, filename):
+SERVICES = {
+    "fanbox": "https://kemono.su/fanbox/user/",
+    "patreon": "https://kemono.su/patreon/user/",
+    "gumroad": "https://kemono.su/gumroad/user/"
+}
+
+def download(url, filename):
     with open(filename, "wb") as f:
         response = requests.get(url)
         f.write(response.content)
 
-def download_files(urls, filenames):
+def download_all(urls, filenames):
     with ThreadPoolExecutor(max_workers=5) as executor:
-        executor.map(download_file, urls, filenames)
+        executor.map(download, urls, filenames)
 
 def scrape_attachments(post_url, artist_name):
     base_url = "https://kemono.su"
@@ -24,12 +30,13 @@ def scrape_attachments(post_url, artist_name):
     if attachments:
         for attachment in attachments:
             attachment_url = attachment.get("href")
-            filename_with_download = urllib.parse.unquote(attachment.text)  # Extract filename from the <a>
+            filename_with_download = urllib.parse.unquote(attachment.text)
             filename = filename_with_download.replace("Download ", "")
             filename = filename.encode('utf-8').decode('utf-8-sig', errors='replace')
             filename = filename.replace("?", "_").replace("=", "_")
+            filename = os.path.join("Scraped", artist_name, filename.strip())  # Use os.path.join for path joining
             urls.append(attachment_url)
-            filenames.append(f"Scraped/{artist_name}/{filename.strip()}")
+            filenames.append(filename)
         if urls:
             print(f"Found attachments in post: {full_url}")
             return urls, filenames
@@ -40,50 +47,74 @@ def scrape_attachments(post_url, artist_name):
         print(f"Skipping post without attachments: {post_url}")
         return None, None
 
-def get_artist_name(user_id):
-    response = requests.get(f"https://kemono.su/fanbox/user/{user_id}")
-    soup = BeautifulSoup(response.content, "html.parser")
-    artist_name_element = soup.find("span", itemprop="name")
-    if artist_name_element:
-        return artist_name_element.text.strip()
-    else:
+def get_name(user_id, service):
+    try:
+        response = requests.get(SERVICES[service] + user_id)
+        response.raise_for_status()  
+        soup = BeautifulSoup(response.content, "html.parser")
+        name_element = soup.find("span", itemprop="name")
+        if name_element:
+            return name_element.text.strip()
+        else:
+            return "Unknown Artist"
+    except requests.RequestException:
         return "Unknown Artist"
 
-def get_user_posts(user_id):
-    response = requests.get(f"https://kemono.su/fanbox/user/{user_id}")
-    soup = BeautifulSoup(response.content, "html.parser")
-    posts = soup.find_all("article", class_="post-card post-card--preview")
-    return posts
+def get_posts(user_id, service):
+    try:
+        response = requests.get(SERVICES[service] + user_id)
+        response.raise_for_status()  
+        soup = BeautifulSoup(response.content, "html.parser")
+        posts = soup.find_all("article", class_="post-card post-card--preview")
+        return posts
+    except requests.RequestException:
+        return []
 
-user_id_to_scrape = "338517" # Change user id
-posts = get_user_posts(user_id_to_scrape)
-artist_name = get_artist_name(user_id_to_scrape)
+def auto_switch(user_id, services):
+    for service in services:
+        name = get_name(user_id, service)
+        if name != "Unknown Artist":
+            return service, name
+    return None, "Unknown Artist"
 
-folder_path = f"Scraped/{artist_name}"
-if not os.path.exists(folder_path):
-    os.makedirs(folder_path)
+user_id_to_scrape = "12561573"  # User to change
+services_to_try = ["fanbox", "patreon", "gumroad"]
 
-total_posts_scanned = 0
-posts_with_attachments = 0
+service_to_scrape, artist_name = auto_switch(user_id_to_scrape, services_to_try)
 
-attachment_urls = []
-attachment_filenames = []
+if service_to_scrape:
+    print(f"Service selected: {service_to_scrape}")
+    print(f"Artist Name: {artist_name}")
 
-for post in posts:
-    post_url = post.find("a")["href"]
-    total_posts_scanned += 1
-    urls, filenames = scrape_attachments(post_url, artist_name)
-    if urls:
-        attachment_urls.extend(urls)
-        attachment_filenames.extend(filenames)
-        posts_with_attachments += 1
+    posts = get_posts(user_id_to_scrape, service_to_scrape)
 
-print(f"Total posts scanned: {total_posts_scanned}")
-print(f"Posts with attachments found: {posts_with_attachments}")
+    folder_path = f"Scraped/{artist_name}"
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path)
 
-if attachment_urls:
-    print("Starting download...")
-    download_files(attachment_urls, attachment_filenames)
-    print("Download completed.")
+    total_posts_scanned = 0
+    posts_with_attachments = 0
+
+    attachment_urls = []
+    attachment_filenames = []
+
+    for post in posts:
+        post_url = post.find("a")["href"]
+        total_posts_scanned += 1
+        urls, filenames = scrape_attachments(post_url, artist_name)
+        if urls:
+            attachment_urls.extend(urls)
+            attachment_filenames.extend(filenames)
+            posts_with_attachments += 1
+
+    print(f"Total posts scanned: {total_posts_scanned}")
+    print(f"Posts with attachments found: {posts_with_attachments}")
+
+    if attachment_urls:
+        print("Starting download...")
+        download_all(attachment_urls, attachment_filenames)
+        print("Download completed.")
+    else:
+        print("No attachments found to download.")
 else:
-    print("No attachments found to download.")
+    print("Failed to fetch artist information.")
